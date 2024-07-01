@@ -205,23 +205,25 @@ def main():
         summary_data.append((source_range, current_range, reachable_count, total_hosts))
 
         if args.detailed and reachable_hosts:
-            df = pd.DataFrame(results, columns=['Host', 'Test', 'Result', 'Extra Info'])
-            result_table = df.pivot(index='Host', columns='Test', values='Result').fillna('❌')
+            detailed_results = [result for result in results if result[2] == "✔️"]
+            if detailed_results:
+                df = pd.DataFrame(detailed_results, columns=['Host', 'Test', 'Result', 'Extra Info'])
+                result_table = df.pivot(index='Host', columns='Test', values='Result').fillna('❌')
 
-            # Merge DNS resolution information
-            if 'DNS Resolution' in result_table.columns:
-                result_table['DNS Resolution'] = df.set_index('Host')['Extra Info'].dropna()
-                result_table['DNS Resolution'] = result_table['DNS Resolution'].fillna('')
+                # Merge DNS resolution information
+                if 'DNS Resolution' in result_table.columns:
+                    result_table['DNS Resolution'] = df.set_index('Host')['Extra Info'].dropna()
+                    result_table['DNS Resolution'] = result_table['DNS Resolution'].fillna('')
 
-            # Display results using rich
-            result_table_rich = Table(show_header=True, header_style="bold magenta")
-            result_table_rich.add_column("Host", style="dim", width=20)
-            for column in result_table.columns:
-                result_table_rich.add_column(column, width=20)
-            for index, row in result_table.iterrows():
-                result_table_rich.add_row(index, *[row[col] for col in result_table.columns])
+                # Display results using rich
+                result_table_rich = Table(show_header=True, header_style="bold magenta")
+                result_table_rich.add_column("Host", style="dim", width=20)
+                for column in result_table.columns:
+                    result_table_rich.add_column(column, width=20)
+                for index, row in result_table.iterrows():
+                    result_table_rich.add_row(index, *[row[col] for col in result_table.columns])
 
-            console.print(Panel(result_table_rich, title=f"Test Results for {current_range}"))
+                console.print(Panel(result_table_rich, title=f"Test Results for {current_range}"))
 
     # Display summary
     summary_table = Table(show_header=True, header_style="bold magenta")
