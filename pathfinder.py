@@ -12,6 +12,8 @@ from rich.panel import Panel
 from rich.markdown import Markdown
 from datetime import datetime, timedelta
 import os
+import matplotlib.pyplot as plt
+from threading import Lock
 
 # Function to check DNS resolution
 def dns_resolution_test(host):
@@ -51,16 +53,6 @@ def icmp_address_mask_test(host):
     except Exception as e:
         return host, 'ICMP Address Mask', False, None
 
-# Function to ping using ICMP Router Solicitation Request
-def icmp_router_solicitation_test(host):
-    try:
-        response = subprocess.run(['nmap', '-PR', '-sn', host],
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-        return host, 'ICMP Router Solicitation', "Host is up" in response.stdout.decode(), None
-    except Exception as e:
-        return host, 'ICMP Router Solicitation', False, None
-
 # Function to perform TCP SYN scan on common ports
 def tcp_syn_scan(host):
     common_ports = [80, 443, 22, 21, 23, 25, 110, 135, 139, 445, 3389]
@@ -96,11 +88,12 @@ def get_adapter_range(adapter):
     
     raise ValueError(f"No IPv4 address found for adapter: {adapter}")
 
-def create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time):
+def create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time, completed_subnets, total_subnets):
     elapsed_time = datetime.now() - start_time
     estimated_total_time = (elapsed_time / completed_hosts) * total_hosts if completed_hosts > 0 else timedelta(seconds=0)
     remaining_time = estimated_total_time - elapsed_time
     progress_text = f"{completed_hosts}/{total_hosts} ({(completed_hosts / total_hosts) * 100:.2f}%)"
+    subnets_progress_text = f"{completed_subnets}/{total_subnets}"
     
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Source Subnet", width=30)
@@ -109,35 +102,86 @@ def create_status_table(source_range, current_range, test_name, completed_hosts,
     table.add_column("Progress", width=20)
     table.add_column("Elapsed Time", width=20)
     table.add_column("Remaining Time", width=20)
-    table.add_row(source_range, current_range, test_name, progress_text, str(elapsed_time).split('.')[0], str(remaining_time).split('.')[0])
+    table.add_column("Subnets Progress", width=20)
+    table.add_row(source_range, current_range, test_name, progress_text, str(elapsed_time).split('.')[0], str(remaining_time).split('.')[0], subnets_progress_text)
     return table
 
-def update_status(live, source_range, current_range, test_name, completed_hosts, total_hosts, start_time):
-    table = create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time)
+def update_status(live, source_range, current_range, test_name, completed_hosts, total_hosts, start_time, completed_subnets, total_subnets):
+    table = create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time, completed_subnets, total_subnets)
     live.update(Panel(table, title="Current Scan Status"))
 
-def save_results(df, current_range):
+def save_results_html(df, current_range):
     output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"{current_range.replace('/', '_')}_results.csv")
-    df.to_csv(output_file, index=False)
+    output_file = os.path.join(output_dir, f"{current_range.replace('/', '_')}_results.html")
+    df.to_html(output_file, index=False, border=0)
     return output_file
 
-def scan_subnet(source_range, current_range, hosts, tests, live, start_time):
+def scan_subnet(source_range, current_range, hosts, tests, live, start_time, completed_subnets, total_subnets):
     results = []
+    icmp_results = []
+    completed_hosts = [0]
+    total_hosts = len(hosts)
+    lock = Lock()
+    
+    def update_host_progress(test_name):
+        with lock:
+            completed_hosts[0] += 1
+            update_status(live, source_range, current_range, test_name, completed_hosts[0], total_hosts, start_time, completed_subnets[0], total_subnets)
+    
     for test in tests:
         test_name = test.__name__.replace('_test', '').replace('_', ' ').title()
-        completed_hosts = 0
         with ThreadPoolExecutor(max_workers=100) as executor:
             futures = {executor.submit(test, host): host for host in hosts}
             for future in futures:
                 host, test_name, result, extra_info = future.result()
                 status_icon = "✔️" if result else "❌"
                 results.append((host, test_name, status_icon, extra_info))
-                completed_hosts += 1
-                update_status(live, source_range, current_range, test_name, completed_hosts, len(hosts), start_time)
-    
+                if "ICMP" in test_name or "DNS" in test_name:
+                    icmp_results.append((host, result))
+                update_host_progress(test_name)
+
+    # Check if any host responded to ICMP tests
+    if not any(result for host, result in icmp_results):
+        tcp_results = []
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            futures = {executor.submit(tcp_syn_scan, host): host for host in hosts}
+            for future in futures:
+                host, test_name, result, extra_info = future.result()
+                status_icon = "✔️" if result else "❌"
+                tcp_results.append((host, test_name, status_icon, extra_info))
+                update_host_progress("TCP SYN Scan")
+        
+        results.extend(tcp_results)
+
     return results
+
+def save_summary_html(summary_data, output_file):
+    summary_df = pd.DataFrame(summary_data, columns=["Source Subnet", "Destination Subnet", "Reachable Hosts", "Total Hosts"])
+    summary_df.to_html(output_file, index=False, border=0)
+
+def generate_visualizations(summary_data):
+    output_dir = "results"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create a bar chart for reachable hosts per subnet
+    subnets = [item[1] for item in summary_data]
+    reachable_counts = [item[2] for item in summary_data]
+    total_counts = [item[3] for item in summary_data]
+
+    plt.figure(figsize=(10, 6))
+    plt.barh(subnets, reachable_counts, color='green', label='Reachable Hosts')
+    plt.barh(subnets, total_counts, color='red', alpha=0.3, label='Total Hosts')
+    plt.xlabel('Number of Hosts')
+    plt.title('Reachable Hosts per Subnet')
+    plt.legend()
+    plt.tight_layout()
+
+    # Save the plot
+    output_file = os.path.join(output_dir, 'reachable_hosts_per_subnet.png')
+    plt.savefig(output_file)
+    plt.close()
+    print(f"Visualization saved to {output_file}")
 
 # Main function to handle the arguments and start the tests
 def main():
@@ -174,23 +218,41 @@ def main():
     console = Console()
     console.print(Markdown(f"# Starting tests from {source_range}"))
 
-    tests = [dns_resolution_test, icmp_echo_test, icmp_timestamp_test, icmp_address_mask_test, icmp_router_solicitation_test]
+    tests = [dns_resolution_test, icmp_echo_test, icmp_timestamp_test, icmp_address_mask_test]
 
     start_time = datetime.now()
+    total_subnets = len(ranges)
+    completed_subnets = [0]  # Use list to allow modification within threads
+
+    saved_results_files = []
 
     with Live(console=console, refresh_per_second=1) as live:
-        for current_range in ranges:
+        def process_single_range(current_range):
             hosts = process_range(current_range)
-            results = scan_subnet(source_range, current_range, hosts, tests, live, start_time)
+            results = scan_subnet(source_range, current_range, hosts, tests, live, start_time, completed_subnets, total_subnets)
             all_results.append((current_range, results))
             
             if results:
                 df = pd.DataFrame(results, columns=['Host', 'Test', 'Result', 'Extra Info'])
                 result_table = df.pivot(index='Host', columns='Test', values='Result').fillna('❌')
                 
-                # Save results to file
-                output_file = save_results(df, current_range)
-                console.print(f"Results saved to {output_file}")
+                # Save results to HTML file
+                output_file = save_results_html(df, current_range)
+                saved_results_files.append(f"Results saved to {output_file}")
+            completed_subnets[0] += 1
+            update_status(live, source_range, current_range, "Subnet Progress", len(hosts), len(hosts), start_time, completed_subnets[0], total_subnets)
+
+        with ThreadPoolExecutor(max_workers=10) as executor:  # Parallel subnet scanning
+            futures = {executor.submit(process_single_range, current_range): current_range for current_range in ranges}
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    console.print(f"Error processing range {futures[future]}: {e}")
+
+    # Display saved results file paths
+    for result_file in saved_results_files:
+        console.print(result_file)
 
     # Display final results
     summary_data = []
@@ -201,8 +263,8 @@ def main():
             if result[1] != 'DNS Resolution' and result[2] == "✔️":
                 reachable_hosts.append(result[0])
         reachable_count = len(set(reachable_hosts))
-        total_hosts = len(process_range(current_range))
-        summary_data.append((source_range, current_range, reachable_count, total_hosts))
+        total_hosts_in_range = len(process_range(current_range))
+        summary_data.append((source_range, current_range, reachable_count, total_hosts_in_range))
 
         if args.detailed and reachable_hosts:
             detailed_results = [result for result in results if result[2] == "✔️"]
@@ -225,7 +287,7 @@ def main():
 
                 console.print(Panel(result_table_rich, title=f"Test Results for {current_range}"))
 
-    # Display summary
+    # Display and save summary
     summary_table = Table(show_header=True, header_style="bold magenta")
     summary_table.add_column("Source Subnet", style="dim", width=30)
     summary_table.add_column("Destination Subnet", style="dim", width=30)
@@ -237,6 +299,13 @@ def main():
         summary_table.add_row(source, dest, f"{reachable_icon} {reachable}", str(total))
     
     console.print(Panel(summary_table, title="Summary of Scan Results"))
+
+    summary_output_file = "results/summary_results.html"
+    save_summary_html(summary_data, summary_output_file)
+    console.print(f"Summary results saved to {summary_output_file}")
+
+    # Generate detailed summaries and visualizations
+    generate_visualizations(summary_data)
 
 if __name__ == "__main__":
     main()
