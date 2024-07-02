@@ -96,7 +96,7 @@ def get_adapter_range(adapter):
     
     raise ValueError(f"No IPv4 address found for adapter: {adapter}")
 
-def create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time):
+def create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time, subnet_progress):
     elapsed_time = datetime.now() - start_time
     estimated_total_time = (elapsed_time / completed_hosts) * total_hosts if completed_hosts > 0 else timedelta(seconds=0)
     remaining_time = estimated_total_time - elapsed_time
@@ -109,21 +109,29 @@ def create_status_table(source_range, current_range, test_name, completed_hosts,
     table.add_column("Progress", width=20)
     table.add_column("Elapsed Time", width=20)
     table.add_column("Remaining Time", width=20)
-    table.add_row(source_range, current_range, test_name, progress_text, str(elapsed_time).split('.')[0], str(remaining_time).split('.')[0])
+    table.add_column("Subnet Progress", width=20)
+    table.add_row(source_range, current_range, test_name, progress_text, str(elapsed_time).split('.')[0], str(remaining_time).split('.')[0], subnet_progress)
     return table
 
-def update_status(live, source_range, current_range, test_name, completed_hosts, total_hosts, start_time):
-    table = create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time)
+def update_status(live, source_range, current_range, test_name, completed_hosts, total_hosts, start_time, subnet_progress):
+    table = create_status_table(source_range, current_range, test_name, completed_hosts, total_hosts, start_time, subnet_progress)
     live.update(Panel(table, title="Current Scan Status"))
 
 def save_results(df, current_range):
     output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"{current_range.replace('/', '_')}_results.csv")
-    df.to_csv(output_file, index=False)
+    output_file = os.path.join(output_dir, f"{current_range.replace('/', '_')}_results.html")
+    df.to_html(output_file, index=False)
     return output_file
 
-def scan_subnet(source_range, current_range, hosts, tests, live, start_time):
+def save_summary(summary_df):
+    output_dir = "results"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, "summary_results.html")
+    summary_df.to_html(output_file, index=False)
+    return output_file
+
+def scan_subnet(source_range, current_range, hosts, tests, live, start_time, subnet_progress):
     results = []
     for test in tests:
         test_name = test.__name__.replace('_test', '').replace('_', ' ').title()
@@ -135,7 +143,7 @@ def scan_subnet(source_range, current_range, hosts, tests, live, start_time):
                 status_icon = "✔️" if result else "❌"
                 results.append((host, test_name, status_icon, extra_info))
                 completed_hosts += 1
-                update_status(live, source_range, current_range, test_name, completed_hosts, len(hosts), start_time)
+                update_status(live, source_range, current_range, test_name, completed_hosts, len(hosts), start_time, subnet_progress)
     
     return results
 
@@ -179,9 +187,10 @@ def main():
     start_time = datetime.now()
 
     with Live(console=console, refresh_per_second=1) as live:
-        for current_range in ranges:
+        for index, current_range in enumerate(ranges, start=1):
+            subnet_progress = f"{index}/{len(ranges)}"
             hosts = process_range(current_range)
-            results = scan_subnet(source_range, current_range, hosts, tests, live, start_time)
+            results = scan_subnet(source_range, current_range, hosts, tests, live, start_time, subnet_progress)
             all_results.append((current_range, results))
             
             if results:
@@ -232,11 +241,17 @@ def main():
     summary_table.add_column("Reachable Hosts", style="dim", width=20)
     summary_table.add_column("Total Hosts", style="dim", width=20)
     
+    summary_df = pd.DataFrame(summary_data, columns=["Source Subnet", "Destination Subnet", "Reachable Hosts", "Total Hosts"])
+    
     for source, dest, reachable, total in summary_data:
         reachable_icon = "✔️" if reachable > 0 else "❌"
         summary_table.add_row(source, dest, f"{reachable_icon} {reachable}", str(total))
     
     console.print(Panel(summary_table, title="Summary of Scan Results"))
+
+    # Save summary results to file
+    summary_file = save_summary(summary_df)
+    console.print(f"Summary results saved to {summary_file}")
 
 if __name__ == "__main__":
     main()
